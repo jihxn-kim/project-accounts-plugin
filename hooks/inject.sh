@@ -56,6 +56,44 @@ PROJECT="$(jq -r --arg cwd "$CWD" '
 ' "$MAPPING_FILE")"
 [ -n "$PROJECT" ] || exit 0
 
+# Identify which managed CLI is actually invoked, then verify it's installed.
+# Only run this guard when the CWD already matched a project — we don't want
+# to nag users who run `aws`/`vercel`/etc. outside any registered repo.
+INVOKED_CLI=""
+while IFS= read -r cli; do
+  [ -z "$cli" ] && continue
+  if printf '%s' "$CMD" | grep -Eq "(^|[[:space:];&|()\`]+)${cli}([[:space:]]|$)"; then
+    INVOKED_CLI="$cli"
+    break
+  fi
+done < <(jq -r '(.managed_clis // [])[]' "$MAPPING_FILE" 2>/dev/null)
+
+if [ -n "$INVOKED_CLI" ] && ! command -v "$INVOKED_CLI" >/dev/null 2>&1; then
+  case "$INVOKED_CLI" in
+    aws)      HINT="brew install awscli  (or: pip install awscli)" ;;
+    vercel)   HINT="npm i -g vercel" ;;
+    railway)  HINT="brew install railway  (or: npm i -g @railway/cli)" ;;
+    gcloud)   HINT="brew install --cask google-cloud-sdk" ;;
+    flyctl)   HINT="brew install flyctl" ;;
+    doctl)    HINT="brew install doctl" ;;
+    heroku)   HINT="brew tap heroku/brew && brew install heroku" ;;
+    supabase) HINT="brew install supabase/tap/supabase" ;;
+    *)        HINT="install $INVOKED_CLI for your platform" ;;
+  esac
+  jq -n \
+    --arg cli "$INVOKED_CLI" \
+    --arg project "$PROJECT" \
+    --arg hint "$HINT" \
+    '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: ("[project-accounts] " + $cli + " CLI is not installed on this machine (project=" + $project + "). Install hint: " + $hint)
+      }
+    }'
+  exit 0
+fi
+
 ENV_PAIRS="$(jq -r --arg p "$PROJECT" --arg e "$AUTO_ENV" '
   (.projects[$p].envs[$e].credentials // {}) | to_entries[] | [.key, .value] | @tsv
 ' "$MAPPING_FILE")"
