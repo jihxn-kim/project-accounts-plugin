@@ -9,6 +9,7 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 
 - **Mapping file:** `~/.claude/project-accounts.json` (auto-created on first hook run if missing)
 - **Secret files:** `~/.claude/secrets/*.token` (chmod 600, referenced via `@file:` prefix)
+- **Key files:** `~/.claude/secrets/*.pem` (chmod 600, registered as a path-valued env var — see PEM section)
 - **Hook:** ships with this plugin under `hooks/inject.sh`, registered as PreToolUse/Bash
 
 ## Schema
@@ -43,8 +44,18 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 - `aliases`: only for coded/non-obvious names. Directory and project names are usually self-explanatory — rely on semantic matching first.
 - `repos`: maps a repo role (`backend`, `frontend`, `admin`) to its local clone path. Optional — a project with no `repos` is remote-only (invoked by name only).
 - `envs.<name>`: conventionally `dev`, `staging`, `prod`. Each env has its own credentials and service IDs.
-- `credentials`: env vars to inject. Plain values for non-secrets (profiles, team IDs); `@file:<path>` for secrets.
+- `credentials`: env vars to inject. Plain values for non-secrets (profiles, team IDs, **paths to key files**); `@file:<path>` for token-style secrets whose *contents* should become the env value. Plain `~/...` paths are tilde-expanded by the hook.
 - `services`: per-env deployment targets for logs/deploy/status commands.
+
+### Two value modes for `credentials`
+
+| Use case | Value form | Hook behavior |
+|----------|------------|---------------|
+| AWS profile name, team ID, region | plain string (`"acme-dev"`) | injected as-is |
+| Token whose *content* is the secret | `@file:~/.claude/secrets/<x>.token` | reads file, injects content |
+| Path to a key file (PEM, kubeconfig) | plain string (`"~/.claude/secrets/<x>.pem"`) | injected as path; CLI tool reads the file via `-i` / `--kubeconfig` / etc. |
+
+**Rule of thumb:** if the CLI takes the secret as a flag value (`--token=...`), use `@file:`. If the CLI takes a *path* to the secret (`ssh -i <path>`), store the path as a plain string.
 
 ## Safety policy: dev auto, prod explicit
 
@@ -194,6 +205,42 @@ pbpaste | tr -d '\r\n' > ~/.claude/secrets/$NAME.token && \
 ```
 
 Then reference it in the mapping: `"RAILWAY_TOKEN": "@file:~/.claude/secrets/<name>.token"`.
+
+### Store a PEM key (SSH private key)
+
+Unlike tokens, a PEM key is consumed by the path (e.g. `ssh -i <path>`), not by content. Move (or copy) the file into `~/.claude/secrets/`, lock it down, then register the **path** as a plain credential value.
+
+```bash
+NAME="<project>-<purpose>"           # e.g. acme-prod-bastion
+SRC="<path the user gave you>"       # e.g. ~/Downloads/acme-bastion.pem
+mkdir -p ~/.claude/secrets && chmod 700 ~/.claude/secrets
+cp "$SRC" ~/.claude/secrets/$NAME.pem && chmod 600 ~/.claude/secrets/$NAME.pem && \
+  echo "saved: $(wc -c < ~/.claude/secrets/$NAME.pem) bytes"
+```
+
+Then register as a plain (non-`@file:`) env var so the hook injects the path:
+
+```bash
+jq --arg p "<project>" --arg e "<env>" \
+   --arg k "EC2_SSH_KEY" --arg v "~/.claude/secrets/$NAME.pem" \
+   '.projects[$p].envs[$e].credentials[$k] = $v' \
+   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+```
+
+Usage in commands (the hook auto-injects `EC2_SSH_KEY` for dev):
+
+```bash
+ssh -i "$EC2_SSH_KEY" ec2-user@<host>
+```
+
+For prod / non-dev envs, resolve inline (same pattern as token-based prod):
+
+```bash
+KEY="$(jq -r '.projects["<project>"].envs.prod.credentials.EC2_SSH_KEY' ~/.claude/project-accounts.json | sed 's|^~|'"$HOME"'|')"
+ssh -i "$KEY" ec2-user@<host>
+```
+
+If the user already has the PEM in `~/.ssh/` and doesn't want to move it, you can register that absolute path directly — the chmod 600 / `~/.claude/secrets/` convention is just the recommended default.
 
 ### Remove a project / repo / env
 

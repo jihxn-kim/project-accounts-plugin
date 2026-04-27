@@ -115,6 +115,12 @@ while IFS=$'\t' read -r key value; do
     else
       continue
     fi
+  else
+    # Expand leading ~ for path-style values (PEM keys, kubeconfig, etc.).
+    case "$value" in
+      "~/"*) value="${HOME}${value#\~}" ;;
+      "~")   value="$HOME" ;;
+    esac
   fi
   [ -z "$value" ] && continue
   printf -v escaped "%q" "$value"

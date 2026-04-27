@@ -13,6 +13,7 @@ Step-by-step walkthroughs for the most common scenarios. All examples use mock p
 - [Registering a Vercel project](#registering-a-vercel-project)
 - [Registering a Railway project](#registering-a-railway-project)
 - [Multi-environment (dev + prod)](#multi-environment-dev--prod)
+- [Registering a PEM key for EC2 / SSH](#registering-a-pem-key-for-ec2--ssh)
 - [Storing secrets safely](#storing-secrets-safely)
 - [Natural-language invocation patterns](#natural-language-invocation-patterns)
 - [Troubleshooting](#troubleshooting)
@@ -287,6 +288,85 @@ Mapping after:
 | You ask Claude: "redeploy prod" | Claude confirms first ("you want to redeploy `acme-erp-prod-server`?"), then runs |
 
 The hook **never** auto-injects prod credentials. This is by design.
+
+---
+
+## Registering a PEM key for EC2 / SSH
+
+Some products still need a SSH PEM key — e.g. you're SSH'ing into an EC2 bastion or a non-SSM-managed instance, or a vendor handed you a `.pem` for their host. The plugin supports this without a schema change.
+
+### Concept
+
+PEM key vs. token — different consumption pattern:
+
+| Secret type | How CLI consumes it | How to store in mapping |
+|-------------|---------------------|--------------------------|
+| API token (Vercel, Railway) | flag value: `--token=<content>` | `@file:` reference (hook reads file → injects content) |
+| PEM key | path argument: `ssh -i <path>` | plain string path (hook injects path; CLI opens the file itself) |
+
+### Step 1 — move the PEM into the secrets directory
+
+Tell Claude:
+
+> "register a PEM key for `acme-erp` prod, the file is at `~/Downloads/acme-bastion.pem`, name it `acme-prod-bastion`"
+
+Claude runs:
+
+```bash
+mkdir -p ~/.claude/secrets && chmod 700 ~/.claude/secrets
+cp ~/Downloads/acme-bastion.pem ~/.claude/secrets/acme-prod-bastion.pem
+chmod 600 ~/.claude/secrets/acme-prod-bastion.pem
+```
+
+(If you'd rather keep it in `~/.ssh/`, you can — the `~/.claude/secrets/` convention is just the recommended default. Use whatever absolute path you prefer in the next step.)
+
+### Step 2 — register the path as a credential
+
+```bash
+jq --arg p "acme-erp" --arg e "prod" \
+   --arg k "EC2_SSH_KEY" --arg v "~/.claude/secrets/acme-prod-bastion.pem" \
+   '.projects[$p].envs[$e].credentials[$k] = $v' \
+   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+```
+
+Note: **plain string, not `@file:`**. The value is a *path*, not the key contents.
+
+### Step 3 — use it
+
+If registered under `dev` and you're inside the registered repo, the hook auto-injects `EC2_SSH_KEY` (with `~` expanded), so you can just:
+
+```bash
+ssh -i "$EC2_SSH_KEY" ec2-user@bastion.acme.dev
+```
+
+For prod (or any non-dev), invoke by name through the skill:
+
+> "ssh into acme-erp prod bastion"
+
+Claude resolves the path, expands `~`, and runs `ssh -i <abs-path> ec2-user@<host>`.
+
+### Bonus: store the host alongside the key
+
+If you don't want to remember the host every time, add a `services` entry:
+
+```bash
+jq --arg p "acme-erp" --arg e "prod" --arg svc "bastion" \
+   --argjson spec '{"platform":"ssh","host":"bastion.acme.com","user":"ec2-user","key":"EC2_SSH_KEY"}' \
+   '.projects[$p].envs[$e].services[$svc] = $spec' \
+   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+```
+
+Then "ssh into acme-erp prod bastion" gives Claude everything to construct the full command.
+
+### When you don't need PEM at all
+
+If the EC2 has SSM agent + a SSM-enabled IAM role, skip PEM entirely and use:
+
+```bash
+aws ssm start-session --target i-0abc123...
+```
+
+— uses your AWS profile only, no SSH/PEM. Worth trying first; it's the modern path.
 
 ---
 
