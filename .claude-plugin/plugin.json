@@ -1,0 +1,19 @@
+{
+  "name": "project-accounts",
+  "version": "0.1.0",
+  "description": "Per-project CLI credential routing for Claude Code. Auto-injects the right cloud CLI auth (AWS profile, Vercel/Railway/etc. tokens) based on the working directory, with a skill that resolves natural-language requests like \"<project> prod backend logs\" against a structured project/repos/envs/services mapping.",
+  "author": {
+    "name": "Kim Jihun"
+  },
+  "keywords": [
+    "credentials",
+    "aws",
+    "vercel",
+    "railway",
+    "multi-account",
+    "cli",
+    "hook",
+    "skill"
+  ],
+  "license": "MIT"
+}

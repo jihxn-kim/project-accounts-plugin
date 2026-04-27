@@ -1,0 +1,15 @@
+{
+  "name": "project-accounts",
+  "description": "Per-project CLI credential routing for Claude Code",
+  "owner": {
+    "name": "Kim Jihun"
+  },
+  "plugins": [
+    {
+      "name": "project-accounts",
+      "description": "Per-project CLI credential routing for Claude Code",
+      "version": "0.1.0",
+      "source": "./"
+    }
+  ]
+}
