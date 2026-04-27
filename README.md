@@ -5,7 +5,7 @@ Per-project CLI credential routing for Claude Code. Stop juggling AWS profiles, 
 ## What it does
 
 1. **Hook** — when you `cd` into a registered repo and run `aws`, `railway`, `vercel`, `gcloud`, `flyctl`, `doctl`, `heroku`, or `supabase`, the right env vars (profile names, tokens, scope IDs) are prepended to the command. The CLI just works without flags or `--profile` juggling.
-2. **Skill** — when you ask Claude in natural language ("acme-erp prod backend logs from 12:30", "deploy with_dan to production"), Claude looks up the project in your mapping, pulls the credentials from a secret file, and runs the right command — even if you're not in the repo directory.
+2. **Skill** — when you ask Claude in natural language ("acme-erp prod backend logs from 12:30", "deploy storefront to production"), Claude looks up the project in your mapping, pulls the credentials from a secret file, and runs the right command — even if you're not in the repo directory.
 
 ## Safety: dev auto, prod explicit
 
@@ -28,7 +28,7 @@ After install, the first time the hook runs it will create an empty mapping file
 
 Just ask Claude: "register a new project, name X, AWS profile Y" — the skill handles the rest, including walking you through token storage if you have secrets to keep out of the JSON.
 
-If you prefer to set things up by hand, see `skills/project-accounts/SKILL.md` for the full schema and jq command catalog.
+For step-by-step walkthroughs, see [docs/USAGE.md](docs/USAGE.md). For the full schema and jq command catalog, see `skills/project-accounts/SKILL.md`.
 
 ## Security notes
 
