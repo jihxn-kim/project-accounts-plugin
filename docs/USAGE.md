@@ -304,59 +304,76 @@ PEM key vs. token — different consumption pattern:
 | API token (Vercel, Railway) | flag value: `--token=<content>` | `@file:` reference (hook reads file → injects content) |
 | PEM key | path argument: `ssh -i <path>` | plain string path (hook injects path; CLI opens the file itself) |
 
+### What you need before starting
+
+A PEM file alone is **not enough** — to actually SSH you need the trio: **key + host + user**. Have these ready (or pasted from your `~/.ssh/config`) before asking Claude to register:
+
+| Field | Example |
+|-------|---------|
+| PEM file location | `~/Downloads/acme.pem`, `~/Downloads/acme-blue.pem` |
+| Host (DNS or IP) | `bastion.acme.com`, `54.180.x.x` |
+| User | `ubuntu`, `ec2-user`, `bitnami` (depends on AMI) |
+| Service role | `backend`, `bastion`, `db`, ... |
+
+If you have entries in `~/.ssh/config` already, just paste those — Claude can extract everything from `Host` / `HostName` / `User` / `IdentityFile`.
+
 ### Step 1 — move the PEM into the secrets directory
 
-Tell Claude:
-
-> "register a PEM key for `acme-erp` prod, the file is at `~/Downloads/acme-bastion.pem`, name it `acme-prod-bastion`"
-
-Claude runs:
+Claude runs (per env):
 
 ```bash
 mkdir -p ~/.claude/secrets && chmod 700 ~/.claude/secrets
-cp ~/Downloads/acme-bastion.pem ~/.claude/secrets/acme-prod-bastion.pem
-chmod 600 ~/.claude/secrets/acme-prod-bastion.pem
+cp ~/Downloads/acme.pem      ~/.claude/secrets/acme-prod.pem && chmod 600 ~/.claude/secrets/acme-prod.pem
+cp ~/Downloads/acme-blue.pem ~/.claude/secrets/acme-dev.pem  && chmod 600 ~/.claude/secrets/acme-dev.pem
 ```
 
-(If you'd rather keep it in `~/.ssh/`, you can — the `~/.claude/secrets/` convention is just the recommended default. Use whatever absolute path you prefer in the next step.)
+(If you'd rather keep the PEM in `~/.ssh/`, you can — `~/.claude/secrets/` is just the recommended default. Register whatever absolute path you prefer in the next step.)
 
-### Step 2 — register the path as a credential
+### Step 2 — register the key path as a credential
 
 ```bash
-jq --arg p "acme-erp" --arg e "prod" \
-   --arg k "EC2_SSH_KEY" --arg v "~/.claude/secrets/acme-prod-bastion.pem" \
-   '.projects[$p].envs[$e].credentials[$k] = $v' \
+jq '.projects.acme.envs.dev.credentials.EC2_SSH_KEY  = "~/.claude/secrets/acme-dev.pem"
+  | .projects.acme.envs.prod.credentials.EC2_SSH_KEY = "~/.claude/secrets/acme-prod.pem"' \
    ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
 ```
 
-Note: **plain string, not `@file:`**. The value is a *path*, not the key contents.
+Plain string, **not `@file:`** — the value is a *path*, not key contents. The hook expands leading `~` automatically.
 
-### Step 3 — use it
+### Step 3 — register the ssh service (host + user)
 
-If registered under `dev` and you're inside the registered repo, the hook auto-injects `EC2_SSH_KEY` (with `~` expanded), so you can just:
-
-```bash
-ssh -i "$EC2_SSH_KEY" ec2-user@bastion.acme.dev
-```
-
-For prod (or any non-dev), invoke by name through the skill:
-
-> "ssh into acme-erp prod bastion"
-
-Claude resolves the path, expands `~`, and runs `ssh -i <abs-path> ec2-user@<host>`.
-
-### Bonus: store the host alongside the key
-
-If you don't want to remember the host every time, add a `services` entry:
+Without this, the registration is dead data — Claude knows the key but not where to use it.
 
 ```bash
-jq --arg p "acme-erp" --arg e "prod" --arg svc "bastion" \
-   --argjson spec '{"platform":"ssh","host":"bastion.acme.com","user":"ec2-user","key":"EC2_SSH_KEY"}' \
-   '.projects[$p].envs[$e].services[$svc] = $spec' \
+jq '.projects.acme.envs.dev.services.backend  = {"platform":"ssh","host":"13.124.x.x", "user":"ubuntu","key":"EC2_SSH_KEY"}
+  | .projects.acme.envs.prod.services.backend = {"platform":"ssh","host":"54.180.x.x","user":"ubuntu","key":"EC2_SSH_KEY"}' \
    ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
 ```
 
-Then "ssh into acme-erp prod bastion" gives Claude everything to construct the full command.
+### Step 4 — verify with a connection test
+
+Always run a sanity check after registration:
+
+```bash
+ssh -i ~/.claude/secrets/acme-prod.pem \
+    -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    ubuntu@54.180.x.x 'echo ok && uname -a'
+```
+
+If it times out: instance may be stopped, IP may have changed (Public IPv4 changes after restart unless an Elastic IP is attached), or your current public IP isn't allowed by the security group's port-22 inbound rule.
+
+### Step 5 — use it
+
+For dev with a registered repo: hook auto-injects `EC2_SSH_KEY`, so:
+
+```bash
+ssh -i "$EC2_SSH_KEY" ubuntu@<host>
+```
+
+For prod or any name-based call:
+
+> "ssh into acme prod backend"
+
+Claude resolves key + host + user from the mapping and runs the full command.
 
 ### When you don't need PEM at all
 

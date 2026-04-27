@@ -208,17 +208,33 @@ Then reference it in the mapping: `"RAILWAY_TOKEN": "@file:~/.claude/secrets/<na
 
 ### Store a PEM key (SSH private key)
 
-Unlike tokens, a PEM key is consumed by the path (e.g. `ssh -i <path>`), not by content. Move (or copy) the file into `~/.claude/secrets/`, lock it down, then register the **path** as a plain credential value.
+Unlike tokens, a PEM key alone is **incomplete**. To actually SSH you need `key + host + user` — registering only the key leaves dead data. **Always collect the connection info upfront** and register the key *and* at least one ssh service together.
+
+#### Required info before doing anything
+
+Ask the user for these in one go (offer to read from `~/.ssh/config` if they have entries there):
+
+1. **PEM file location(s)** — and which env each one belongs to (dev / prod / etc.)
+2. **Host** — DNS or IP for each env's instance
+3. **User** — `ec2-user`, `ubuntu`, `bitnami`, … (AMI-dependent; if unknown, try `ec2-user` first then `ubuntu`)
+4. **Service role** — what is this host? `backend`, `bastion`, `db`, etc.
+5. **Port** — only ask if non-default (22)
+
+If the user only provides the key without host/user, **stop and ask for the rest** before writing to the mapping. A registered PEM with no service entry is misleading.
+
+#### Step 1 — move the PEM(s) into the secrets dir
 
 ```bash
-NAME="<project>-<purpose>"           # e.g. acme-prod-bastion
-SRC="<path the user gave you>"       # e.g. ~/Downloads/acme-bastion.pem
+NAME="<project>-<env>"        # e.g. acme-prod, acme-dev
+SRC="<path the user gave>"    # e.g. ~/Downloads/acme.pem
 mkdir -p ~/.claude/secrets && chmod 700 ~/.claude/secrets
 cp "$SRC" ~/.claude/secrets/$NAME.pem && chmod 600 ~/.claude/secrets/$NAME.pem && \
   echo "saved: $(wc -c < ~/.claude/secrets/$NAME.pem) bytes"
 ```
 
-Then register as a plain (non-`@file:`) env var so the hook injects the path:
+#### Step 2 — register key path as a credential
+
+Plain string (not `@file:`) so the hook injects the *path*. The hook expands leading `~`.
 
 ```bash
 jq --arg p "<project>" --arg e "<env>" \
@@ -227,20 +243,41 @@ jq --arg p "<project>" --arg e "<env>" \
    ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
 ```
 
-Usage in commands (the hook auto-injects `EC2_SSH_KEY` for dev):
+#### Step 3 — register the ssh service (host + user + key reference)
 
 ```bash
-ssh -i "$EC2_SSH_KEY" ec2-user@<host>
+jq --arg p "<project>" --arg e "<env>" --arg svc "<role>" \
+   --argjson spec '{"platform":"ssh","host":"<dns-or-ip>","user":"<ubuntu|ec2-user|...>","key":"EC2_SSH_KEY"}' \
+   '.projects[$p].envs[$e].services[$svc] = $spec' \
+   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
 ```
 
-For prod / non-dev envs, resolve inline (same pattern as token-based prod):
+#### Step 4 — verify with a connection test
+
+Always offer to run a connection check after registration so the user knows it actually works:
 
 ```bash
-KEY="$(jq -r '.projects["<project>"].envs.prod.credentials.EC2_SSH_KEY' ~/.claude/project-accounts.json | sed 's|^~|'"$HOME"'|')"
-ssh -i "$KEY" ec2-user@<host>
+ssh -i ~/.claude/secrets/$NAME.pem \
+    -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    <user>@<host> 'echo ok && uname -a'
 ```
 
-If the user already has the PEM in `~/.ssh/` and doesn't want to move it, you can register that absolute path directly — the chmod 600 / `~/.claude/secrets/` convention is just the recommended default.
+If timeout: instance may be stopped, IP may have changed, or security group may not allow your current public IP. Don't silently move on — tell the user what to check (instance state, current Public IPv4, SG inbound 22).
+
+#### Invocation later
+
+For dev with a registered repo: hook auto-injects `EC2_SSH_KEY`, user runs `ssh -i "$EC2_SSH_KEY" ubuntu@<host>` directly.
+
+For prod or any name-based call ("dalcom prod backend ssh"): resolve from mapping:
+
+```bash
+KEY="$(jq -r '.projects["<p>"].envs.<e>.credentials.EC2_SSH_KEY' ~/.claude/project-accounts.json | sed 's|^~|'"$HOME"'|')"
+HOST="$(jq -r '.projects["<p>"].envs.<e>.services.<svc>.host' ~/.claude/project-accounts.json)"
+USER="$(jq -r '.projects["<p>"].envs.<e>.services.<svc>.user' ~/.claude/project-accounts.json)"
+ssh -i "$KEY" "$USER@$HOST"
+```
+
+If the user already keeps the PEM in `~/.ssh/` and doesn't want it moved, register that absolute path directly — the `~/.claude/secrets/` convention is just the recommended default.
 
 ### Remove a project / repo / env
 
