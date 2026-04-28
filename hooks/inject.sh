@@ -25,6 +25,9 @@ if [ ! -f "$MAPPING_FILE" ]; then
 }
 EOF
 fi
+# Tighten perms on the mapping file every run — covers freshly-bootstrapped
+# files and existing ones from older versions that may have shipped 0644.
+chmod 600 "$MAPPING_FILE" 2>/dev/null || true
 mkdir -p "$SECRETS_DIR" 2>/dev/null && chmod 700 "$SECRETS_DIR" 2>/dev/null
 
 INPUT="$(cat)"

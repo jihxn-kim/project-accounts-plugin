@@ -103,21 +103,37 @@ When invoking, always pull the service/app id from `services.<svc>.service` (or 
 
 ## Operations
 
-Always edit via `jq --arg` / `--argjson` to avoid shell-quoting bugs. Never hand-edit the JSON.
+**All mutations must go through `pa-update`.** Never write to `~/.claude/project-accounts.json` with `jq … > /tmp/foo && mv` or `> file` — that pattern skips backup, validation, and chmod, and risks corrupting the mapping mid-write. The helper:
 
-### List projects
+- writes a timestamped backup to `~/.claude/project-accounts.backups/` (chmod 600, last 20 kept)
+- stages output via `mktemp` in the mapping's own directory
+- runs `jq empty` on the result before replacing
+- atomically `mv`s into place and re-applies `chmod 600`
+- aborts (mapping intact) if the filter errors or output isn't valid JSON
+
+### Resolve the helper path
+
+The script ships inside the plugin's install cache. Resolve once per session (or inline):
+
+```bash
+PA="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts/pa-update.sh 2>/dev/null | sort -V | tail -1)"
+```
+
+If `$PA` is empty, the plugin isn't installed properly — tell the user to run `claude plugin install project-accounts@project-accounts`. Reads (no mutation) call `jq` directly against the mapping; only writes need `$PA`.
+
+### List projects (read-only)
 
 ```bash
 jq -r '.projects | keys[]' ~/.claude/project-accounts.json
 ```
 
-### Show a project's full config
+### Show a project's full config (read-only)
 
 ```bash
 jq --arg p "<name>" '.projects[$p]' ~/.claude/project-accounts.json
 ```
 
-### Show which project matches the current directory
+### Show which project matches the current directory (read-only)
 
 ```bash
 CWD="$PWD"
@@ -136,19 +152,18 @@ jq -r --arg cwd "$CWD" '
 ### Add a new project (initial creation)
 
 ```bash
-jq --arg name "<project-name>" '.projects[$name] = {
+"$PA" --arg name "<project-name>" '.projects[$name] = {
   aliases: [],
   repos: {},
   envs: {}
-}' ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+}'
 ```
 
 ### Add a repo to an existing project
 
 ```bash
-jq --arg p "<project>" --arg r "<repo-role>" --arg path "<absolute-path>" \
-   '.projects[$p].repos[$r] = $path' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg r "<repo-role>" --arg path "<absolute-path>" \
+  '.projects[$p].repos[$r] = $path'
 ```
 
 ### Add or replace an env block
@@ -162,27 +177,24 @@ ENV_JSON='{
     "backend": { "platform": "railway", "service": "<service-id>" }
   }
 }'
-jq --arg p "<project>" --arg e "dev" --argjson env "$ENV_JSON" \
-   '.projects[$p].envs[$e] = $env' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "dev" --argjson env "$ENV_JSON" \
+  '.projects[$p].envs[$e] = $env'
 ```
 
 ### Add or update a single credential
 
 ```bash
-jq --arg p "<project>" --arg e "<env>" \
-   --arg k "<KEY>" --arg v "<value-or-@file:path>" \
-   '.projects[$p].envs[$e].credentials[$k] = $v' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "<env>" \
+  --arg k "<KEY>" --arg v "<value-or-@file:path>" \
+  '.projects[$p].envs[$e].credentials[$k] = $v'
 ```
 
 ### Add a service to an env
 
 ```bash
-jq --arg p "<project>" --arg e "<env>" --arg svc "db" \
-   --argjson spec '{"platform":"railway","service":"<service-id>","notes":"optional"}' \
-   '.projects[$p].envs[$e].services[$svc] = $spec' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "<env>" --arg svc "db" \
+  --argjson spec '{"platform":"railway","service":"<service-id>","notes":"optional"}' \
+  '.projects[$p].envs[$e].services[$svc] = $spec'
 ```
 
 ### Store a token (secret)
@@ -239,19 +251,17 @@ cp "$SRC" ~/.claude/secrets/$NAME.pem && chmod 600 ~/.claude/secrets/$NAME.pem &
 Plain string (not `@file:`) so the hook injects the *path*. The hook expands leading `~`.
 
 ```bash
-jq --arg p "<project>" --arg e "<env>" \
-   --arg k "EC2_SSH_KEY" --arg v "~/.claude/secrets/$NAME.pem" \
-   '.projects[$p].envs[$e].credentials[$k] = $v' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "<env>" \
+  --arg k "EC2_SSH_KEY" --arg v "~/.claude/secrets/$NAME.pem" \
+  '.projects[$p].envs[$e].credentials[$k] = $v'
 ```
 
 #### Step 3 — register the ssh service (host + user + key reference)
 
 ```bash
-jq --arg p "<project>" --arg e "<env>" --arg svc "<role>" \
-   --argjson spec '{"platform":"ssh","host":"<dns-or-ip>","user":"<ubuntu|ec2-user|...>","key":"EC2_SSH_KEY"}' \
-   '.projects[$p].envs[$e].services[$svc] = $spec' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "<env>" --arg svc "<role>" \
+  --argjson spec '{"platform":"ssh","host":"<dns-or-ip>","user":"<ubuntu|ec2-user|...>","key":"EC2_SSH_KEY"}' \
+  '.projects[$p].envs[$e].services[$svc] = $spec'
 ```
 
 #### Step 4 — verify with a connection test
@@ -283,27 +293,35 @@ If the user already keeps the PEM in `~/.ssh/` and doesn't want it moved, regist
 
 ### Remove a project / repo / env
 
+Destructive — confirm with the user first. The helper writes a backup, but make the user explicit about what is being removed before running.
+
 ```bash
 # Remove entire project
-jq --arg p "<project>" 'del(.projects[$p])' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" 'del(.projects[$p])'
 
 # Remove one repo
-jq --arg p "<project>" --arg r "<repo>" 'del(.projects[$p].repos[$r])' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg r "<repo>" 'del(.projects[$p].repos[$r])'
 
 # Remove an env
-jq --arg p "<project>" --arg e "<env>" 'del(.projects[$p].envs[$e])' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" --arg p "<project>" --arg e "<env>" 'del(.projects[$p].envs[$e])'
 ```
 
-When removing, ask the user before deleting any secret file that referenced the removed mapping.
+When removing, ask the user before deleting any secret file that referenced the removed mapping. The most recent backups live at `~/.claude/project-accounts.backups/` if you need to roll back.
 
 ### Add a new CLI to `managed_clis`
 
 ```bash
-jq '.managed_clis += ["kubectl"] | .managed_clis |= unique' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" '.managed_clis += ["kubectl"] | .managed_clis |= unique'
+```
+
+### Restore from backup
+
+If a mutation went wrong:
+
+```bash
+ls -1t ~/.claude/project-accounts.backups/ | head    # see recent backups
+cp ~/.claude/project-accounts.backups/project-accounts.<timestamp>.json ~/.claude/project-accounts.json
+chmod 600 ~/.claude/project-accounts.json
 ```
 
 ## Running commands for non-dev envs

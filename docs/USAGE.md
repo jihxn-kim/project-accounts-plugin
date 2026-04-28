@@ -331,10 +331,17 @@ cp ~/Downloads/acme-blue.pem ~/.claude/secrets/acme-dev.pem  && chmod 600 ~/.cla
 
 ### Step 2 — register the key path as a credential
 
+Mutations of the mapping go through the plugin's `pa-update` helper, which writes a timestamped backup, validates the result, and atomically replaces the file (chmod 600). Resolve its path once:
+
 ```bash
-jq '.projects.acme.envs.dev.credentials.EC2_SSH_KEY  = "~/.claude/secrets/acme-dev.pem"
-  | .projects.acme.envs.prod.credentials.EC2_SSH_KEY = "~/.claude/secrets/acme-prod.pem"' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+PA="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts/pa-update.sh | sort -V | tail -1)"
+```
+
+Then:
+
+```bash
+"$PA" '.projects.acme.envs.dev.credentials.EC2_SSH_KEY  = "~/.claude/secrets/acme-dev.pem"
+     | .projects.acme.envs.prod.credentials.EC2_SSH_KEY = "~/.claude/secrets/acme-prod.pem"'
 ```
 
 Plain string, **not `@file:`** — the value is a *path*, not key contents. The hook expands leading `~` automatically.
@@ -344,9 +351,8 @@ Plain string, **not `@file:`** — the value is a *path*, not key contents. The 
 Without this, the registration is dead data — Claude knows the key but not where to use it.
 
 ```bash
-jq '.projects.acme.envs.dev.services.backend  = {"platform":"ssh","host":"13.124.x.x", "user":"ubuntu","key":"EC2_SSH_KEY"}
-  | .projects.acme.envs.prod.services.backend = {"platform":"ssh","host":"54.180.x.x","user":"ubuntu","key":"EC2_SSH_KEY"}' \
-   ~/.claude/project-accounts.json > /tmp/_pa.json && mv /tmp/_pa.json ~/.claude/project-accounts.json
+"$PA" '.projects.acme.envs.dev.services.backend  = {"platform":"ssh","host":"13.124.x.x", "user":"ubuntu","key":"EC2_SSH_KEY"}
+     | .projects.acme.envs.prod.services.backend = {"platform":"ssh","host":"54.180.x.x","user":"ubuntu","key":"EC2_SSH_KEY"}'
 ```
 
 ### Step 4 — verify with a connection test
