@@ -89,6 +89,12 @@ else
   printf 'Credentials in dev:\n'
   while IFS=$'\t' read -r key value; do
     [ -z "$key" ] && continue
+    # Empty value: hook would skip with reason "empty-value". Surface that
+    # here so status reflects the runtime hook behaviour.
+    if [ -z "$value" ]; then
+      printf '  %s  (empty — hook will skip)\n' "$key"
+      continue
+    fi
     if [[ "$value" == @file:* ]]; then
       filepath="$(expand_tilde "${value#@file:}")"
       if [ -r "$filepath" ]; then
