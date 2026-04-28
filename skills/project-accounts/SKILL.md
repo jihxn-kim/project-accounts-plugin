@@ -26,8 +26,9 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
           "credentials": { "<ENV_VAR>": "<value or @file:...>", ... },
           "services": {
             "<service-name>": {
-              "platform": "railway|vercel|aws|...",
+              "platform": "railway|vercel|aws|ssh|...",
               "service":  "<platform-specific id>",
+              "ssh_alias":"<~/.ssh/config Host alias>",
               "notes":    "optional operational context"
             }
           }
@@ -60,6 +61,8 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 **Path format rule (strict):** every path written to the mapping — `repos[*]`, path-style credentials, `@file:` targets — MUST start with `/` (absolute) or `~/` (home-relative). Reject `./`, `../`, or bare names. The mapping is global state shared across CWDs, so relative paths have no defined base and produce environment-dependent bugs. If a user supplies `./local.pem`, normalise to an absolute path (resolve against the user's `pwd` or the registered repo path) before writing. If a user supplies a bare filename, ask which directory they meant — never guess.
 
 **Credential key format rule:** keys must match `^[A-Za-z_][A-Za-z0-9_]*$` (POSIX env-var names). The hook silently drops any key with shell metacharacters, whitespace, or unusual punctuation — those would be rejected anyway, so don't write them in the first place.
+
+**SSH alias format rule:** when an ssh service uses `ssh_alias`, the alias must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. No spaces, no `=`, no leading `-`. The plugin passes the alias to `ssh -G`; rejecting metacharacters here keeps the surface small. (`pa-doctor` will fail any service whose alias doesn't pass.)
 
 **Security note on `@file:`:** the hook does *not* read the secret in the hook process. It rewrites the command to `KEY="$(tr -d '\r\n' < <path>)"`, so the actual content is materialised only inside the bash subshell that runs the user's command — keeping the secret out of every text artefact (logs, transcripts, hook output).
 
@@ -247,11 +250,35 @@ pbpaste | tr -d '\r\n' > ~/.claude/secrets/$NAME.token && \
 
 Then reference it in the mapping: `"RAILWAY_TOKEN": "@file:~/.claude/secrets/<name>.token"`.
 
-### Store a PEM key (SSH private key)
+### Register an SSH service
+
+There are two ways to wire up an ssh target — pick based on whether the user already has a `~/.ssh/config` entry that connects.
+
+**Always check `~/.ssh/config` first.** Run `ssh -G -- <alias-the-user-mentioned>` and grep for `^(hostname|user|identityfile) `. If `hostname` resolves to a real host (different from the alias literal), use the `ssh_alias` shorthand below. If not, fall through to the explicit form.
+
+#### Form A — `ssh_alias` (delegate to `~/.ssh/config`)
+
+When the user's `~/.ssh/config` already has a `Host <alias>` block that fully describes the connection (HostName, User, IdentityFile), register the service with just the alias:
+
+```bash
+"$PA" --arg p "<project>" --arg e "<env>" --arg svc "<role>" \
+  --argjson spec '{"platform":"ssh","ssh_alias":"<alias>"}' \
+  '.projects[$p].envs[$e].services[$svc] = $spec'
+```
+
+Pros: single source of truth (ssh config). All ssh-aware tooling — `ssh`, `scp`, `rsync`, `ansible`, etc. — uses the same alias. The plugin doesn't duplicate host/user/identity.
+
+`pa-doctor` resolves the alias via `ssh -G`, fails if the alias isn't found in ssh config, and probes the resolved hostname. The skill invokes `ssh <alias>` for ssh-into operations (no `-i`, no `-l`).
+
+This form does **not** need an `EC2_SSH_KEY` credential — the identity comes from the IdentityFile directive in ssh config.
+
+#### Form B — explicit (`host` + `user` + `key`)
+
+Use this when the user has a PEM file but no `~/.ssh/config` entry, or when they explicitly want the plugin to manage the connection details.
 
 Unlike tokens, a PEM key alone is **incomplete**. To actually SSH you need `key + host + user` — registering only the key leaves dead data. **Always collect the connection info upfront** and register the key *and* at least one ssh service together.
 
-#### Required info before doing anything
+##### Required info before doing anything
 
 Ask the user for these in one go (offer to read from `~/.ssh/config` if they have entries there):
 
@@ -263,7 +290,7 @@ Ask the user for these in one go (offer to read from `~/.ssh/config` if they hav
 
 If the user only provides the key without host/user, **stop and ask for the rest** before writing to the mapping. A registered PEM with no service entry is misleading.
 
-#### Step 1 — move the PEM(s) into the secrets dir
+##### Step 1 — move the PEM(s) into the secrets dir
 
 ```bash
 NAME="<project>-<env>"        # e.g. acme-prod, acme-dev
@@ -273,7 +300,7 @@ cp "$SRC" ~/.claude/secrets/$NAME.pem && chmod 600 ~/.claude/secrets/$NAME.pem &
   echo "saved: $(wc -c < ~/.claude/secrets/$NAME.pem) bytes"
 ```
 
-#### Step 2 — register key path as a credential
+##### Step 2 — register key path as a credential
 
 Plain string (not `@file:`) so the hook injects the *path*. The hook expands leading `~`.
 
@@ -283,7 +310,7 @@ Plain string (not `@file:`) so the hook injects the *path*. The hook expands lea
   '.projects[$p].envs[$e].credentials[$k] = $v'
 ```
 
-#### Step 3 — register the ssh service (host + user + key reference)
+##### Step 3 — register the ssh service (host + user + key reference)
 
 ```bash
 "$PA" --arg p "<project>" --arg e "<env>" --arg svc "<role>" \
@@ -291,7 +318,7 @@ Plain string (not `@file:`) so the hook injects the *path*. The hook expands lea
   '.projects[$p].envs[$e].services[$svc] = $spec'
 ```
 
-#### Step 4 — verify with a connection test
+##### Step 4 — verify with a connection test
 
 Always offer to run a connection check after registration so the user knows it actually works:
 
@@ -303,11 +330,20 @@ ssh -i ~/.claude/secrets/$NAME.pem \
 
 If timeout: instance may be stopped, IP may have changed, or security group may not allow your current public IP. Don't silently move on — tell the user what to check (instance state, current Public IPv4, SG inbound 22).
 
-#### Invocation later
+##### Invocation later
 
 For dev with a registered repo: hook auto-injects `EC2_SSH_KEY`, user runs `ssh -i "$EC2_SSH_KEY" ubuntu@<host>` directly.
 
-For prod or any name-based call ("dalcom prod backend ssh"): resolve from mapping:
+For prod or any name-based call ("dalcom prod backend ssh"): resolve from mapping based on the form used.
+
+If the service uses `ssh_alias`:
+
+```bash
+ALIAS="$(jq -r '.projects["<p>"].envs.<e>.services.<svc>.ssh_alias' ~/.claude/project-accounts.json)"
+ssh "$ALIAS"
+```
+
+If the service uses explicit `host`/`user`/`key`:
 
 ```bash
 KEY="$(jq -r '.projects["<p>"].envs.<e>.credentials.EC2_SSH_KEY' ~/.claude/project-accounts.json | sed 's|^~|'"$HOME"'|')"

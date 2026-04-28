@@ -295,7 +295,33 @@ The hook **never** auto-injects prod credentials. This is by design.
 
 Some products still need a SSH PEM key — e.g. you're SSH'ing into an EC2 bastion or a non-SSM-managed instance, or a vendor handed you a `.pem` for their host. The plugin supports this without a schema change.
 
-### Concept
+### Two registration shapes
+
+Pick based on whether the host is already wired up in your `~/.ssh/config`:
+
+| Shape | When to use | What the mapping stores |
+|-------|-------------|--------------------------|
+| **`ssh_alias`** (preferred when ssh config has the host) | `ssh <alias>` already works on your machine | just `{platform:"ssh", ssh_alias:"<alias>"}` — host/user/identity come from `~/.ssh/config` |
+| **explicit** (`host` + `user` + `key`) | no `~/.ssh/config` entry, or you want the plugin to own the connection details | `{platform:"ssh", host, user, key:"EC2_SSH_KEY"}` plus a credential pointing at the PEM path |
+
+If you give Claude a paste of your `~/.ssh/config` Host block, it extracts hostname/user/identity from there and registers via `ssh_alias`. If you only give a PEM file plus a hostname, it falls through to the explicit shape.
+
+### Shape A — ssh_alias (delegate to ~/.ssh/config)
+
+If `ssh dalcom` already connects to your prod box, the registration is one line:
+
+```bash
+PA="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts/pa-update.sh | sort -V | tail -1)"
+"$PA" '.projects.dalcom.envs.prod.services.backend = {"platform":"ssh","ssh_alias":"dalcom"}'
+```
+
+No need to register an `EC2_SSH_KEY` credential — the IdentityFile lives in your ssh config. `pa-doctor` resolves the alias via `ssh -G`, fails if the alias isn't found in your ssh config, and probes the resolved hostname for reachability.
+
+When Claude later runs "ssh into dalcom prod backend", it executes `ssh dalcom` — no `-i`, no `-l`, no host substitution.
+
+### Shape B — explicit host/user/key
+
+Use this path when there's no `~/.ssh/config` entry to delegate to.
 
 PEM key vs. token — different consumption pattern:
 
@@ -304,9 +330,9 @@ PEM key vs. token — different consumption pattern:
 | API token (Vercel, Railway) | flag value: `--token=<content>` | `@file:` reference (hook reads file → injects content) |
 | PEM key | path argument: `ssh -i <path>` | plain string path (hook injects path; CLI opens the file itself) |
 
-### What you need before starting
+#### What you need before starting
 
-A PEM file alone is **not enough** — to actually SSH you need the trio: **key + host + user**. Have these ready (or pasted from your `~/.ssh/config`) before asking Claude to register:
+A PEM file alone is **not enough** — to actually SSH you need the trio: **key + host + user**. Have these ready before asking Claude to register:
 
 | Field | Example |
 |-------|---------|
@@ -315,9 +341,7 @@ A PEM file alone is **not enough** — to actually SSH you need the trio: **key 
 | User | `ubuntu`, `ec2-user`, `bitnami` (depends on AMI) |
 | Service role | `backend`, `bastion`, `db`, ... |
 
-If you have entries in `~/.ssh/config` already, just paste those — Claude can extract everything from `Host` / `HostName` / `User` / `IdentityFile`.
-
-### Step 1 — move the PEM into the secrets directory
+#### Step 1 — move the PEM into the secrets directory
 
 Claude runs (per env):
 
@@ -329,7 +353,7 @@ cp ~/Downloads/acme-blue.pem ~/.claude/secrets/acme-dev.pem  && chmod 600 ~/.cla
 
 (If you'd rather keep the PEM in `~/.ssh/`, you can — `~/.claude/secrets/` is just the recommended default. Register whatever absolute path you prefer in the next step.)
 
-### Step 2 — register the key path as a credential
+#### Step 2 — register the key path as a credential
 
 Mutations of the mapping go through the plugin's `pa-update` helper, which writes a timestamped backup, validates the result, and atomically replaces the file (chmod 600). Resolve its path once:
 
@@ -346,7 +370,7 @@ Then:
 
 Plain string, **not `@file:`** — the value is a *path*, not key contents. The hook expands leading `~` automatically.
 
-### Step 3 — register the ssh service (host + user)
+#### Step 3 — register the ssh service (host + user)
 
 Without this, the registration is dead data — Claude knows the key but not where to use it.
 
@@ -355,7 +379,7 @@ Without this, the registration is dead data — Claude knows the key but not whe
      | .projects.acme.envs.prod.services.backend = {"platform":"ssh","host":"54.180.x.x","user":"ubuntu","key":"EC2_SSH_KEY"}'
 ```
 
-### Step 4 — verify with a connection test
+#### Step 4 — verify with a connection test
 
 Always run a sanity check after registration:
 
@@ -367,7 +391,7 @@ ssh -i ~/.claude/secrets/acme-prod.pem \
 
 If it times out: instance may be stopped, IP may have changed (Public IPv4 changes after restart unless an Elastic IP is attached), or your current public IP isn't allowed by the security group's port-22 inbound rule.
 
-### Step 5 — use it
+#### Step 5 — use it
 
 For dev with a registered repo: hook auto-injects `EC2_SSH_KEY`, so:
 
@@ -487,6 +511,13 @@ The hook reads `cwd` from the tool input, which is the **session CWD when the ba
 3. Is the CLI name in `managed_clis`? If you added a new CLI, add it to that list.
 4. Did you set the env var inline in your command (e.g., `AWS_PROFILE=other aws ...`)? The hook respects user overrides — and now reports them as `(skipped: <KEY>(override-in-command))` in its `systemMessage`.
 5. Is the `@file:` token file readable? If not, the hook reports `(skipped: <KEY>(unreadable:<path>))`.
+
+### `ssh_alias` service fails in pa-doctor
+
+Two common causes:
+
+- **"not found in ~/.ssh/config (hostname unresolved)"** — the alias isn't matched by any `Host` block in your ssh config. Add an entry, or include the file containing it via `Include` in your main `~/.ssh/config`. To verify: `ssh -G -- <alias> | head -3` should show `hostname` resolving to a real address, not the alias literal.
+- **"invalid (allowed: A-Z a-z 0-9 . _ -, no leading -)"** — the alias name contains a character the plugin won't pass to `ssh -G`. Rename the Host alias to fit, then update the mapping.
 
 ### Vercel/Railway returns "unauthorized"
 
