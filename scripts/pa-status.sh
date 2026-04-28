@@ -100,12 +100,15 @@ else
       fi
     else
       expanded="$(expand_tilde "$value")"
-      if [ "$expanded" != "$value" ] && [ -e "$expanded" ]; then
-        # Looks like a path that exists (e.g. PEM)
-        perms=$(stat -f '%Sp' "$expanded" 2>/dev/null || stat -c '%A' "$expanded" 2>/dev/null)
-        printf '  %s  %s  [path, %s]\n' "$key" "$expanded" "$perms"
-      elif [ "$expanded" != "$value" ]; then
-        printf '  %s  %s  [path, MISSING]\n' "$key" "$expanded"
+      # Match the doctor's rule: only absolute (/...) or tilde (~/...) values
+      # are recognised as paths. Relative paths have no defined base.
+      if [[ "$value" == /* ]] || [ "$expanded" != "$value" ]; then
+        if [ -e "$expanded" ]; then
+          perms=$(stat -f '%Sp' "$expanded" 2>/dev/null || stat -c '%A' "$expanded" 2>/dev/null)
+          printf '  %s  %s  [path, %s]\n' "$key" "$expanded" "$perms"
+        else
+          printf '  %s  %s  [path, MISSING]\n' "$key" "$expanded"
+        fi
       else
         printf '  %s  %s\n' "$key" "$value"
       fi

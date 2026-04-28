@@ -57,6 +57,10 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 
 **Rule of thumb:** if the CLI takes the secret as a flag value (`--token=...`), use `@file:`. If the CLI takes a *path* to the secret (`ssh -i <path>`), store the path as a plain string.
 
+**Path format rule (strict):** every path written to the mapping — `repos[*]`, path-style credentials, `@file:` targets — MUST start with `/` (absolute) or `~/` (home-relative). Reject `./`, `../`, or bare names. The mapping is global state shared across CWDs, so relative paths have no defined base and produce environment-dependent bugs. If a user supplies `./local.pem`, normalise to an absolute path (resolve against the user's `pwd` or the registered repo path) before writing. If a user supplies a bare filename, ask which directory they meant — never guess.
+
+**Credential key format rule:** keys must match `^[A-Za-z_][A-Za-z0-9_]*$` (POSIX env-var names). The hook silently drops any key with shell metacharacters, whitespace, or unusual punctuation — those would be rejected anyway, so don't write them in the first place.
+
 **Security note on `@file:`:** the hook does *not* read the secret in the hook process. It rewrites the command to `KEY="$(tr -d '\r\n' < <path>)"`, so the actual content is materialised only inside the bash subshell that runs the user's command — keeping the secret out of every text artefact (logs, transcripts, hook output).
 
 ## Safety policy: dev auto, prod explicit

@@ -37,7 +37,15 @@ CWD="${CWD:-$PWD}"
 
 [ -n "$CMD" ] || exit 0
 
-CLI_PATTERN="$(jq -r '(.managed_clis // []) | join("|")' "$MAPPING_FILE" 2>/dev/null)"
+# managed_clis entries flow into a grep -E pattern, so each name must be
+# regex-safe. Filter to plain executable names — letters, digits, underscore,
+# dash. Anything else (whitespace, regex metachars, slashes) is silently
+# dropped before the pattern is built.
+CLI_PATTERN="$(jq -r '
+  (.managed_clis // [])
+  | map(select(type == "string" and test("^[A-Za-z][A-Za-z0-9_-]*$")))
+  | join("|")
+' "$MAPPING_FILE" 2>/dev/null)"
 [ -n "$CLI_PATTERN" ] || exit 0
 
 # Only intervene if the command contains a managed CLI as a shell token.
@@ -61,7 +69,8 @@ PROJECT="$(jq -r --arg cwd "$CWD" '
 
 # Identify which managed CLI is actually invoked, then verify it's installed.
 # Only run this guard when the CWD already matched a project — we don't want
-# to nag users who run `aws`/`vercel`/etc. outside any registered repo.
+# to nag users who run `aws`/`vercel`/etc. outside any registered repo. Same
+# regex-safe filter as CLI_PATTERN.
 INVOKED_CLI=""
 while IFS= read -r cli; do
   [ -z "$cli" ] && continue
@@ -69,7 +78,11 @@ while IFS= read -r cli; do
     INVOKED_CLI="$cli"
     break
   fi
-done < <(jq -r '(.managed_clis // [])[]' "$MAPPING_FILE" 2>/dev/null)
+done < <(jq -r '
+  (.managed_clis // [])
+  | map(select(type == "string" and test("^[A-Za-z][A-Za-z0-9_-]*$")))
+  | .[]
+' "$MAPPING_FILE" 2>/dev/null)
 
 if [ -n "$INVOKED_CLI" ] && ! command -v "$INVOKED_CLI" >/dev/null 2>&1; then
   case "$INVOKED_CLI" in
@@ -105,9 +118,20 @@ ENV_PAIRS="$(jq -r --arg p "$PROJECT" --arg e "$AUTO_ENV" '
 EXPORT_ARGS=()
 APPLIED=()
 SKIPPED=()  # entries of the form "KEY(reason)" so debugging surfaces silent skips
+# Match POSIX env-var name format. Anything outside this is silently dropped:
+# keys flow into both a grep -E pattern and an `export KEY=...` assembly, and
+# accepting metacharacters here would let a malformed mapping run arbitrary
+# shell. Defence-in-depth — the mapping is chmod 600, so this is only a
+# last-line guard against typos / paste accidents in pa-update calls.
+KEY_NAME_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 while IFS=$'\t' read -r key value; do
   [ -z "$key" ] && continue
-  # Respect explicit user overrides already in the command.
+  if ! [[ "$key" =~ $KEY_NAME_RE ]]; then
+    SKIPPED+=("$(printf '%q' "$key")(invalid-key)")
+    continue
+  fi
+  # Respect explicit user overrides already in the command. Key has been
+  # validated above, so it's safe to embed in the grep pattern.
   if printf '%s' "$CMD" | grep -Eq "(^|[[:space:];&|()]+)${key}="; then
     SKIPPED+=("${key}(override-in-command)")
     continue
