@@ -56,9 +56,36 @@ stat_perms() {
   stat -f '%Sp' "$1" 2>/dev/null || stat -c '%A' "$1" 2>/dev/null
 }
 
+# Probe whether `nc` accepts `-G secs` (macOS / BSD-style connect timeout).
+# ncat (Nmap) reuses `-G` for source-routing with a different argument shape,
+# so we mustn't pass it blindly. Cached so we don't re-probe per service.
+NC_HAS_G=""
+nc_supports_G() {
+  if [ -z "$NC_HAS_G" ]; then
+    # Match nc help text where -G is documented as a connect timeout. Accept
+    # both "Connection timeout" (macOS BSD nc, e.g. "-G conntimo  Connection
+    # timeout in seconds") and any future variant that mentions "connect"
+    # near -G. ncat (Nmap) uses -G for source routing — its help string
+    # doesn't contain this phrase, so it correctly returns false.
+    #
+    # Capture nc -h output first instead of piping: macOS nc exits non-zero
+    # after printing help, which under `set -o pipefail` would mask the
+    # grep result and falsely report no -G support.
+    local help
+    help="$(nc -h 2>&1 || true)"
+    if printf '%s\n' "$help" | grep -qiE -- '-G[[:space:]].*(onnection|onnect).*timeout'; then
+      NC_HAS_G=1
+    else
+      NC_HAS_G=0
+    fi
+  fi
+  [ "$NC_HAS_G" = 1 ]
+}
+
 # tcp_probe — connect-and-immediately-close, with a hard wall-clock timeout.
-# Tries (in order): GNU coreutils timeout/gtimeout, BSD/macOS nc, then a pure-
-# bash background-and-kill fallback. Returns 0 on success, non-zero otherwise.
+# Tries (in order): GNU coreutils timeout/gtimeout, nc (variant-aware), then a
+# pure-bash background-and-kill fallback. Returns 0 on success, non-zero
+# otherwise.
 #
 # host/port come from the user's JSON mapping, so they MUST never be
 # interpolated into a shell command string. We pass them as positional args
@@ -75,22 +102,48 @@ tcp_probe() {
     return $?
   fi
   if command -v nc >/dev/null 2>&1; then
-    # -z scan, -G connect-timeout (macOS), -w session-timeout. Linux nc ignores
-    # -G silently, which is fine — -w still bounds the call. host/port are
-    # nc's own positional args, never interpolated.
-    nc -z -G "$tmo" -w "$tmo" "$host" "$port" </dev/null >/dev/null 2>&1
+    # -z scan, -w session-timeout. On macOS BSD nc, -w only kicks in *after*
+    # connect, so a filtered port can hang for the OS default; -G adds a
+    # connect-timeout there. ncat doesn't accept -G in this form, so we only
+    # add it when probed support is detected.
+    if nc_supports_G; then
+      nc -z -G "$tmo" -w "$tmo" "$host" "$port" </dev/null >/dev/null 2>&1
+    else
+      nc -z -w "$tmo" "$host" "$port" </dev/null >/dev/null 2>&1
+    fi
     return $?
   fi
-  # Pure-bash fallback: run probe in the background, kill it after $tmo.
+  # Pure-bash fallback: run probe in background, watchdog kills it after $tmo.
+  # We track the sleep PID directly (instead of wrapping it in a subshell) so
+  # we can kill the actual sleep when the probe finishes early — avoiding an
+  # orphaned `sleep $tmo` that would linger to natural expiration.
   bash -c 'true >"/dev/tcp/$1/$2"' bash "$host" "$port" >/dev/null 2>&1 &
   local pid=$!
-  ( sleep "$tmo" && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-  local sleeper=$!
+  sleep "$tmo" &
+  local sleep_pid=$!
+  ( wait "$sleep_pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local watchdog=$!
+
   local rc=0
   wait "$pid" 2>/dev/null || rc=1
-  kill "$sleeper" 2>/dev/null
-  wait "$sleeper" 2>/dev/null
+
+  # Probe is done. Reap the watchdog tree: kill the sleep first (its real
+  # parent is this shell, so we have a direct PID), then the watchdog wrapper.
+  kill -9 "$sleep_pid" 2>/dev/null
+  wait "$sleep_pid" 2>/dev/null
+  kill -9 "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
   return "$rc"
+}
+
+# valid_port — returns 0 iff $1 is an integer in 1..65535. JSON-sourced port
+# values that fail this check are skipped so they don't reach nc / /dev/tcp
+# with junk that would either error or produce confusing output.
+valid_port() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
 # --- 1. mapping + secrets dir --------------------------------------------
@@ -165,6 +218,13 @@ else
       ' "$MAPPING")"
       while IFS=$'\t' read -r key value; do
         [ -z "$key" ] && continue
+        # Empty credential value: hook would skip with reason "empty-value".
+        # Surface that here instead of marking it (plain), to keep doctor
+        # consistent with the runtime hook's behaviour.
+        if [ -z "$value" ]; then
+          warn "    $key (empty — hook will skip)"
+          continue
+        fi
         if [[ "$value" == @file:* ]]; then
           fp="$(expand_tilde "${value#@file:}")"
           if [ ! -e "$fp" ]; then
@@ -188,7 +248,10 @@ else
           if [[ "$value" == /* ]] || [ "$expanded" != "$value" ]; then
             # path-style value (PEM, kubeconfig, etc.)
             if [ ! -e "$expanded" ]; then
-              fail "    $key path:$expanded — MISSING"
+              # WARN, not FAIL — a leading / can also be a non-file value
+              # (e.g. an API URL path "/v1/foo" stored as a plain credential),
+              # so a missing path is informational, not a hard error.
+              warn "    $key path:$expanded — not found (intended as a file path?)"
             else
               perms=$(stat_perms "$expanded")
               if [ "$perms" = "-rw-------" ]; then
@@ -214,6 +277,10 @@ else
         while IFS=$'\t' read -r svc host user port; do
           [ -z "$svc" ] && continue
           [ -z "$host" ] && { warn "    service.$svc — no host configured"; continue; }
+          if ! valid_port "$port"; then
+            warn "    service.$svc — invalid port: $port (must be integer 1-65535)"
+            continue
+          fi
           if tcp_probe "$host" "$port" "$SSH_TIMEOUT"; then
             ok "    service.$svc ssh $user@$host:$port — reachable"
           else
