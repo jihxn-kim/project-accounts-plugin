@@ -111,15 +111,38 @@ When invoking, always pull the service/app id from `services.<svc>.service` (or 
 - atomically `mv`s into place and re-applies `chmod 600`
 - aborts (mapping intact) if the filter errors or output isn't valid JSON
 
-### Resolve the helper path
+### Resolve helper paths
 
-The script ships inside the plugin's install cache. Resolve once per session (or inline):
+The plugin ships three helper scripts inside its install cache. Resolve once per session (or inline):
 
 ```bash
-PA="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts/pa-update.sh 2>/dev/null | sort -V | tail -1)"
+PA_ROOT="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts 2>/dev/null | sort -V | tail -1)"
+PA="$PA_ROOT/pa-update.sh"          # mutate the mapping (atomic + backup)
+PA_STATUS="$PA_ROOT/pa-status.sh"   # read-only: what would inject for $PWD
+PA_DOCTOR="$PA_ROOT/pa-doctor.sh"   # read-only: full health check
 ```
 
-If `$PA` is empty, the plugin isn't installed properly — tell the user to run `claude plugin install project-accounts@project-accounts`. Reads (no mutation) call `jq` directly against the mapping; only writes need `$PA`.
+If `$PA_ROOT` is empty, the plugin isn't installed properly — tell the user to run `claude plugin install project-accounts@project-accounts`. Reads (no mutation) call `jq` directly against the mapping; only writes need `$PA`.
+
+### Diagnose the current state — `pa status`
+
+When the user is unsure why the hook isn't doing what they expected (or just wants to see what's wired up), run `$PA_STATUS`. It resolves CWD against the mapping the same way the hook does and prints:
+- which project / repo matched
+- every dev credential with secret-file size + perms (or MISSING marker)
+- every dev service entry
+- non-dev envs available for name-based invocation
+
+If no project matches, it lists every registered project so the user can pick. Read-only — never writes.
+
+### Full health check — `pa doctor`
+
+Run `$PA_DOCTOR` when the user reports something doesn't work, or after restoring from backup, or after switching machines. It walks the entire mapping and reports:
+- mapping file + secrets dir permissions
+- every `@file:` and path-style credential: existence + chmod (warns on `0644`, fails on missing)
+- every `ssh` service: TCP probe to the configured port (default 22, set `PA_SSH_TIMEOUT` to override; `PA_SKIP_NETWORK=1` to skip)
+- every `managed_clis` entry: presence on `$PATH`
+
+Exit 0 = no failures. Exit 1 = at least one ✗. Warnings (`⚠`) are advisory and don't affect exit code.
 
 ### List projects (read-only)
 
