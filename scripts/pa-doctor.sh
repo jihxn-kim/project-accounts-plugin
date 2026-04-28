@@ -333,12 +333,19 @@ else
             r_user="$(printf '%s\n' "$cfg" | ssh_g_value user)"
             r_id="$(printf '%s\n' "$cfg" | ssh_g_value identityfile)"
             r_port="$(printf '%s\n' "$cfg" | ssh_g_value port)"
-            # If ssh -G simply echoed the alias as the hostname, the alias
-            # isn't matched by any Host block in the user's ssh config. Treat
-            # this as a hard failure — the service is unusable.
+            # If ssh -G echoed the alias back as the hostname, this could be
+            # either:
+            #   (a) the alias has no matching Host block — ssh config falls
+            #       through to the global default and uses the alias literal
+            #       as the hostname; or
+            #   (b) there IS a Host block but its HostName equals the alias
+            #       (e.g. `Host db / HostName db`).
+            # We can't reliably distinguish without parsing ssh config or
+            # diffing `ssh -vG` debug output. Warn the user about the ambiguity
+            # but still probe — the TCP result will reveal whether the target
+            # is real.
             if [ "$r_host" = "$alias" ]; then
-              fail "    service.$svc ssh_alias=\"$alias\" — not found in ~/.ssh/config (hostname unresolved)"
-              continue
+              warn "    service.$svc ssh_alias=\"$alias\" — hostname resolves to alias literal (no Host block matched, or Host block has HostName=$alias)"
             fi
             host="$r_host"
             user="$r_user"

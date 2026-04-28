@@ -64,6 +64,8 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 
 **SSH alias format rule:** when an ssh service uses `ssh_alias`, the alias must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. No spaces, no `=`, no leading `-`. The plugin passes the alias to `ssh -G`; rejecting metacharacters here keeps the surface small. (`pa-doctor` will fail any service whose alias doesn't pass.)
 
+**`Match exec` side-effect:** `ssh -G` evaluates `Match exec "<cmd>"` directives while parsing the config (OpenSSH behavior, not the plugin's choice). If the user has such directives in `~/.ssh/config`, `<cmd>` runs every time `pa-doctor` or `pa-status` resolves an `ssh_alias`. Mention this when registering an ssh_alias if you notice `Match exec` in their config.
+
 **Security note on `@file:`:** the hook does *not* read the secret in the hook process. It rewrites the command to `KEY="$(tr -d '\r\n' < <path>)"`, so the actual content is materialised only inside the bash subshell that runs the user's command — keeping the secret out of every text artefact (logs, transcripts, hook output).
 
 ## Safety policy: dev auto, prod explicit

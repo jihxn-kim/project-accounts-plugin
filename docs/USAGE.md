@@ -512,12 +512,14 @@ The hook reads `cwd` from the tool input, which is the **session CWD when the ba
 4. Did you set the env var inline in your command (e.g., `AWS_PROFILE=other aws ...`)? The hook respects user overrides — and now reports them as `(skipped: <KEY>(override-in-command))` in its `systemMessage`.
 5. Is the `@file:` token file readable? If not, the hook reports `(skipped: <KEY>(unreadable:<path>))`.
 
-### `ssh_alias` service fails in pa-doctor
+### `ssh_alias` service warnings in pa-doctor / pa-status
 
-Two common causes:
-
-- **"not found in ~/.ssh/config (hostname unresolved)"** — the alias isn't matched by any `Host` block in your ssh config. Add an entry, or include the file containing it via `Include` in your main `~/.ssh/config`. To verify: `ssh -G -- <alias> | head -3` should show `hostname` resolving to a real address, not the alias literal.
+- **"hostname resolves to alias literal"** — `ssh -G` returned the alias as the hostname. Two possible causes: (a) the alias has no matching `Host` block in your ssh config (most common), or (b) you intentionally have `Host foo / HostName foo`. The plugin can't reliably distinguish, so it warns and still TCP-probes — the reachability result tells you whether it's a real target. To verify configuration: `ssh -G -- <alias> | head -3`.
 - **"invalid (allowed: A-Z a-z 0-9 . _ -, no leading -)"** — the alias name contains a character the plugin won't pass to `ssh -G`. Rename the Host alias to fit, then update the mapping.
+
+### `Match exec` blocks in `~/.ssh/config` execute during pa-doctor / pa-status
+
+OpenSSH evaluates `Match exec "<cmd>"` blocks while parsing the config — even under `ssh -G`, which doesn't connect. If your `~/.ssh/config` has any `Match exec` directives (commonly used for VPN / network detection), `<cmd>` will run every time the plugin resolves an `ssh_alias`. This is OpenSSH behavior, not the plugin — but worth knowing if you're surprised to see your match probe firing on every `pa-doctor` run.
 
 ### Vercel/Railway returns "unauthorized"
 

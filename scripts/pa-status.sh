@@ -173,12 +173,13 @@ else
         ruser="$(printf '%s\n' "$cfg" | ssh_g_value user)"
         rid="$(printf '%s\n' "$cfg" | ssh_g_value identityfile)"
         rport="$(printf '%s\n' "$cfg" | ssh_g_value port)"
-        # If hostname == alias literal, ssh -G found no Host block matching the
-        # alias and just echoed it back. Surface that here so the user knows
-        # ~/.ssh/config is missing the entry.
+        # If hostname == alias literal, the alias may either be unconfigured
+        # (no Host block matched) or intentionally set with HostName == alias
+        # (e.g. `Host db / HostName db`). Show the resolved values either way
+        # — pa-doctor handles reachability, status is just an inspection tool.
         if [ "$rhost" = "$alias_name" ]; then
-          printf '  %s [ssh] %s (alias) — not found in ~/.ssh/config (hostname did not resolve)\n' \
-            "$svc" "$alias_name"
+          printf '  %s [ssh] %s (alias, hostname=alias literal — verify ~/.ssh/config) → %s@%s:%s  (identity=%s)\n' \
+            "$svc" "$alias_name" "$ruser" "$rhost" "$rport" "${rid:-—}"
         else
           printf '  %s [ssh] %s → %s@%s:%s  (identity=%s)\n' \
             "$svc" "$alias_name" "$ruser" "$rhost" "$rport" "${rid:-—}"
