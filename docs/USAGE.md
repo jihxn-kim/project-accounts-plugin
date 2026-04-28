@@ -462,18 +462,31 @@ If a request is ambiguous (e.g., "show backend logs" without a project name), Cl
 
 ## Troubleshooting
 
+### Two read-only commands you'll lean on
+
+```bash
+PA_ROOT="$(ls -d ~/.claude/plugins/cache/project-accounts/project-accounts/*/scripts | sort -V | tail -1)"
+"$PA_ROOT/pa-status.sh"   # what would inject for $PWD right now
+"$PA_ROOT/pa-doctor.sh"   # full health check across the whole mapping
+```
+
+`pa-status.sh` is the fastest way to see "why is the hook (not) doing X here?" — it shows the project match, the dev credentials with file/permission status, and the registered services.
+
+`pa-doctor.sh` walks every project, every env, every credential, every ssh service (TCP probe), and every entry in `managed_clis`. Run it after switching machines, restoring from backup, or whenever something feels off. Set `PA_SKIP_NETWORK=1` to skip TCP probes.
+
 ### Hook doesn't fire on `cd <repo> && <cli>`
 
 The hook reads `cwd` from the tool input, which is the **session CWD when the bash invocation started** — not where the command navigates to. Fix: actually `cd` in your terminal first, then run the CLI command. Or invoke by name through Claude.
 
 ### Hook fires but no env vars injected
 
-Check:
+`pa-status.sh` will tell you the cause directly. If you'd rather check by hand:
 
-1. Is the directory under one of your registered repos? `jq -r --arg cwd "$PWD" '... ' ~/.claude/project-accounts.json` (full query in `skills/project-accounts/SKILL.md`).
+1. Is the directory under one of your registered repos?
 2. Does the project have an `envs.dev` block? The hook only auto-injects `dev`.
 3. Is the CLI name in `managed_clis`? If you added a new CLI, add it to that list.
-4. Did you set the env var inline in your command (e.g., `AWS_PROFILE=other aws ...`)? The hook respects user overrides.
+4. Did you set the env var inline in your command (e.g., `AWS_PROFILE=other aws ...`)? The hook respects user overrides — and now reports them as `(skipped: <KEY>(override-in-command))` in its `systemMessage`.
+5. Is the `@file:` token file readable? If not, the hook reports `(skipped: <KEY>(unreadable:<path>))`.
 
 ### Vercel/Railway returns "unauthorized"
 

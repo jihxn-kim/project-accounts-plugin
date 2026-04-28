@@ -104,10 +104,12 @@ ENV_PAIRS="$(jq -r --arg p "$PROJECT" --arg e "$AUTO_ENV" '
 
 EXPORT_ARGS=()
 APPLIED=()
+SKIPPED=()  # entries of the form "KEY(reason)" so debugging surfaces silent skips
 while IFS=$'\t' read -r key value; do
   [ -z "$key" ] && continue
   # Respect explicit user overrides already in the command.
   if printf '%s' "$CMD" | grep -Eq "(^|[[:space:];&|()]+)${key}="; then
+    SKIPPED+=("${key}(override-in-command)")
     continue
   fi
   if [[ "$value" == @file:* ]]; then
@@ -118,6 +120,7 @@ while IFS=$'\t' read -r key value; do
     # only materialised inside the bash subshell at exec time — it never lands
     # in the hook output, transcripts, or PreToolUse logs.
     if [ ! -r "$filepath" ]; then
+      SKIPPED+=("${key}(unreadable:${filepath})")
       continue
     fi
     printf -v quoted_path "%q" "$filepath"
@@ -131,27 +134,49 @@ while IFS=$'\t' read -r key value; do
     "~/"*) value="${HOME}${value#\~}" ;;
     "~")   value="$HOME" ;;
   esac
-  [ -z "$value" ] && continue
+  if [ -z "$value" ]; then
+    SKIPPED+=("${key}(empty-value)")
+    continue
+  fi
   printf -v escaped "%q" "$value"
   EXPORT_ARGS+=("${key}=${escaped}")
   APPLIED+=("$key")
 done <<< "$ENV_PAIRS"
 
-[ "${#EXPORT_ARGS[@]}" -gt 0 ] || exit 0
+# Build a status string even when nothing was injected, so the user can see why
+# the hook matched the project but didn't change the command. The :+ guard
+# avoids the bash `set -u` empty-array expansion error.
+APPLIED_STR="$( [ "${#APPLIED[@]}" -gt 0 ] && (IFS=,; printf '%s' "${APPLIED[*]}") )"
+SKIPPED_STR="$( [ "${#SKIPPED[@]}" -gt 0 ] && (IFS=,; printf '%s' "${SKIPPED[*]}") )"
+if [ "${#APPLIED[@]}" -eq 0 ]; then
+  # Project matched but nothing injected — surface why so the user can debug
+  # without having to run `pa status`.
+  STATUS_MSG="[project-accounts] ${PROJECT} (${AUTO_ENV}) → no vars injected"
+  if [ -n "$SKIPPED_STR" ]; then
+    STATUS_MSG="${STATUS_MSG} (skipped: ${SKIPPED_STR})"
+  fi
+  jq -n --arg msg "$STATUS_MSG" '{systemMessage: $msg}'
+  exit 0
+fi
 
 NEW_CMD="export ${EXPORT_ARGS[*]} && ${CMD}"
 
 UPDATED_INPUT="$(printf '%s' "$INPUT" | jq --arg cmd "$NEW_CMD" '.tool_input | .command = $cmd')"
 
+# Compose systemMessage: applied first, then skipped (if any) — variable names
+# only, never values.
+SYSTEM_MSG="[project-accounts] ${PROJECT} (${AUTO_ENV}) → ${APPLIED_STR}"
+if [ -n "$SKIPPED_STR" ]; then
+  SYSTEM_MSG="${SYSTEM_MSG} (skipped: ${SKIPPED_STR})"
+fi
+
 jq -n \
   --argjson input "$UPDATED_INPUT" \
-  --arg project "$PROJECT" \
-  --arg env "$AUTO_ENV" \
-  --arg vars "$(IFS=,; printf '%s' "${APPLIED[*]}")" \
+  --arg msg "$SYSTEM_MSG" \
   '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       updatedInput: $input
     },
-    systemMessage: ("[project-accounts] " + $project + " (" + $env + ") → " + $vars)
+    systemMessage: $msg
   }'
