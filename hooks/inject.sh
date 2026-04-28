@@ -43,7 +43,7 @@ CWD="${CWD:-$PWD}"
 # dropped before the pattern is built.
 CLI_PATTERN="$(jq -r '
   (.managed_clis // [])
-  | map(select(test("^[A-Za-z][A-Za-z0-9_-]*$")))
+  | map(select(type == "string" and test("^[A-Za-z][A-Za-z0-9_-]*$")))
   | join("|")
 ' "$MAPPING_FILE" 2>/dev/null)"
 [ -n "$CLI_PATTERN" ] || exit 0
@@ -80,7 +80,7 @@ while IFS= read -r cli; do
   fi
 done < <(jq -r '
   (.managed_clis // [])
-  | map(select(test("^[A-Za-z][A-Za-z0-9_-]*$")))
+  | map(select(type == "string" and test("^[A-Za-z][A-Za-z0-9_-]*$")))
   | .[]
 ' "$MAPPING_FILE" 2>/dev/null)
 
