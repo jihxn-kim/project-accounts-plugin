@@ -56,6 +56,37 @@ stat_perms() {
   stat -f '%Sp' "$1" 2>/dev/null || stat -c '%A' "$1" 2>/dev/null
 }
 
+# tcp_probe — connect-and-immediately-close, with a hard wall-clock timeout.
+# Tries (in order): GNU coreutils timeout/gtimeout, BSD/macOS nc, then a pure-
+# bash background-and-kill fallback. Returns 0 on success, non-zero otherwise.
+tcp_probe() {
+  local host="$1" port="$2" tmo="$3"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$tmo" bash -c "true >/dev/tcp/$host/$port" 2>/dev/null
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$tmo" bash -c "true >/dev/tcp/$host/$port" 2>/dev/null
+    return $?
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    # -z scan, -G connect-timeout (macOS), -w session-timeout. Linux nc ignores
+    # -G silently, which is fine — -w still bounds the call.
+    nc -z -G "$tmo" -w "$tmo" "$host" "$port" </dev/null >/dev/null 2>&1
+    return $?
+  fi
+  # Pure-bash fallback: run probe in the background, kill it after $tmo.
+  ( bash -c "true >/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+  local pid=$!
+  ( sleep "$tmo" && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local sleeper=$!
+  local rc=0
+  wait "$pid" 2>/dev/null || rc=1
+  kill "$sleeper" 2>/dev/null
+  wait "$sleeper" 2>/dev/null
+  return "$rc"
+}
+
 # --- 1. mapping + secrets dir --------------------------------------------
 section "Mapping & secrets storage"
 
@@ -144,7 +175,9 @@ else
           fi
         else
           expanded="$(expand_tilde "$value")"
-          if [ "$expanded" != "$value" ]; then
+          # Treat as a path if it starts with / or ~ — covers absolute paths
+          # (PEMs registered with their full path) as well as ~/... values.
+          if [[ "$value" == /* ]] || [ "$expanded" != "$value" ]; then
             # path-style value (PEM, kubeconfig, etc.)
             if [ ! -e "$expanded" ]; then
               fail "    $key path:$expanded — MISSING"
@@ -173,9 +206,7 @@ else
         while IFS=$'\t' read -r svc host user port; do
           [ -z "$svc" ] && continue
           [ -z "$host" ] && { warn "    service.$svc — no host configured"; continue; }
-          # Use a TCP probe via /dev/tcp; portable across mac and linux bash.
-          if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
-            exec 3>&- 3<&-
+          if tcp_probe "$host" "$port" "$SSH_TIMEOUT"; then
             ok "    service.$svc ssh $user@$host:$port — reachable"
           else
             warn "    service.$svc ssh $user@$host:$port — port closed or unreachable (timeout ${SSH_TIMEOUT}s)"
