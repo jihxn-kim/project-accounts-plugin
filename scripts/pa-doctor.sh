@@ -114,24 +114,27 @@ tcp_probe() {
     return $?
   fi
   # Pure-bash fallback: run probe in background, watchdog kills it after $tmo.
-  # We track the sleep PID directly (instead of wrapping it in a subshell) so
-  # we can kill the actual sleep when the probe finishes early — avoiding an
-  # orphaned `sleep $tmo` that would linger to natural expiration.
+  # The sleep lives INSIDE the watchdog subshell so `wait` can find it (POSIX
+  # `wait` only works on direct children of the calling shell). An EXIT trap
+  # ensures the inner sleep is reaped if the watchdog itself is terminated
+  # early — that's why we send SIGTERM (default kill), not SIGKILL, when the
+  # probe finishes first; SIGKILL bypasses the trap and would orphan sleep.
   bash -c 'true >"/dev/tcp/$1/$2"' bash "$host" "$port" >/dev/null 2>&1 &
   local pid=$!
-  sleep "$tmo" &
-  local sleep_pid=$!
-  ( wait "$sleep_pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  (
+    sleep "$tmo" &
+    s_pid=$!
+    trap 'kill "$s_pid" 2>/dev/null' EXIT
+    wait "$s_pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
   local watchdog=$!
 
   local rc=0
   wait "$pid" 2>/dev/null || rc=1
 
-  # Probe is done. Reap the watchdog tree: kill the sleep first (its real
-  # parent is this shell, so we have a direct PID), then the watchdog wrapper.
-  kill -9 "$sleep_pid" 2>/dev/null
-  wait "$sleep_pid" 2>/dev/null
-  kill -9 "$watchdog" 2>/dev/null
+  # Probe is done. SIGTERM (not SIGKILL) so the watchdog's EXIT trap fires and
+  # cleans up its inner sleep child.
+  kill "$watchdog" 2>/dev/null
   wait "$watchdog" 2>/dev/null
   return "$rc"
 }
@@ -139,11 +142,16 @@ tcp_probe() {
 # valid_port — returns 0 iff $1 is an integer in 1..65535. JSON-sourced port
 # values that fail this check are skipped so they don't reach nc / /dev/tcp
 # with junk that would either error or produce confusing output.
+#
+# Use `(( 10#$1 ... ))` so leading zeros (e.g. "08", "09") are interpreted as
+# base-10 — bash 4+'s `[ N -ge ... ]` would otherwise reject them as invalid
+# octal. The case-pattern guard above already rejects non-digit input so
+# `10#$1` is always safe to evaluate here.
 valid_port() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
 
 # --- 1. mapping + secrets dir --------------------------------------------
