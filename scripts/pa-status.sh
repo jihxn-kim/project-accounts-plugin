@@ -100,7 +100,8 @@ else
       fi
     else
       expanded="$(expand_tilde "$value")"
-      # Treat values starting with / or ~ as path-style (PEM, kubeconfig, ...).
+      # Match the doctor's rule: only absolute (/...) or tilde (~/...) values
+      # are recognised as paths. Relative paths have no defined base.
       if [[ "$value" == /* ]] || [ "$expanded" != "$value" ]; then
         if [ -e "$expanded" ]; then
           perms=$(stat -f '%Sp' "$expanded" 2>/dev/null || stat -c '%A' "$expanded" 2>/dev/null)

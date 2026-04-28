@@ -59,24 +59,30 @@ stat_perms() {
 # tcp_probe — connect-and-immediately-close, with a hard wall-clock timeout.
 # Tries (in order): GNU coreutils timeout/gtimeout, BSD/macOS nc, then a pure-
 # bash background-and-kill fallback. Returns 0 on success, non-zero otherwise.
+#
+# host/port come from the user's JSON mapping, so they MUST never be
+# interpolated into a shell command string. We pass them as positional args
+# to the inner bash so $1/$2 are treated as literal strings — no chance of
+# `host="x; rm -rf /"` triggering injection.
 tcp_probe() {
   local host="$1" port="$2" tmo="$3"
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$tmo" bash -c "true >/dev/tcp/$host/$port" 2>/dev/null
+    timeout "$tmo" bash -c 'true >"/dev/tcp/$1/$2"' bash "$host" "$port" 2>/dev/null
     return $?
   fi
   if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$tmo" bash -c "true >/dev/tcp/$host/$port" 2>/dev/null
+    gtimeout "$tmo" bash -c 'true >"/dev/tcp/$1/$2"' bash "$host" "$port" 2>/dev/null
     return $?
   fi
   if command -v nc >/dev/null 2>&1; then
     # -z scan, -G connect-timeout (macOS), -w session-timeout. Linux nc ignores
-    # -G silently, which is fine — -w still bounds the call.
+    # -G silently, which is fine — -w still bounds the call. host/port are
+    # nc's own positional args, never interpolated.
     nc -z -G "$tmo" -w "$tmo" "$host" "$port" </dev/null >/dev/null 2>&1
     return $?
   fi
   # Pure-bash fallback: run probe in the background, kill it after $tmo.
-  ( bash -c "true >/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+  bash -c 'true >"/dev/tcp/$1/$2"' bash "$host" "$port" >/dev/null 2>&1 &
   local pid=$!
   ( sleep "$tmo" && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   local sleeper=$!
@@ -175,8 +181,10 @@ else
           fi
         else
           expanded="$(expand_tilde "$value")"
-          # Treat as a path if it starts with / or ~ — covers absolute paths
-          # (PEMs registered with their full path) as well as ~/... values.
+          # Treat as a path only when the value is absolute (/...) or
+          # home-relative (~/...). Relative paths (./, ../) have no defined
+          # base in this plugin's design — credentials live in a global
+          # mapping shared across CWDs — so we don't recognise them.
           if [[ "$value" == /* ]] || [ "$expanded" != "$value" ]; then
             # path-style value (PEM, kubeconfig, etc.)
             if [ ! -e "$expanded" ]; then
