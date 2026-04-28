@@ -52,10 +52,12 @@ Per-project CLI credentials and deployment targets, keyed by project name (not p
 | Use case | Value form | Hook behavior |
 |----------|------------|---------------|
 | AWS profile name, team ID, region | plain string (`"acme-dev"`) | injected as-is |
-| Token whose *content* is the secret | `@file:~/.claude/secrets/<x>.token` | reads file, injects content |
+| Token whose *content* is the secret | `@file:~/.claude/secrets/<x>.token` | rewrites command to read the file at exec time — secret content never appears in the rewritten command, hook output, or transcript |
 | Path to a key file (PEM, kubeconfig) | plain string (`"~/.claude/secrets/<x>.pem"`) | injected as path; CLI tool reads the file via `-i` / `--kubeconfig` / etc. |
 
 **Rule of thumb:** if the CLI takes the secret as a flag value (`--token=...`), use `@file:`. If the CLI takes a *path* to the secret (`ssh -i <path>`), store the path as a plain string.
+
+**Security note on `@file:`:** the hook does *not* read the secret in the hook process. It rewrites the command to `KEY="$(tr -d '\r\n' < <path>)"`, so the actual content is materialised only inside the bash subshell that runs the user's command — keeping the secret out of every text artefact (logs, transcripts, hook output).
 
 ## Safety policy: dev auto, prod explicit
 

@@ -110,18 +110,24 @@ while IFS=$'\t' read -r key value; do
   if [[ "$value" == @file:* ]]; then
     filepath="${value#@file:}"
     filepath="${filepath/#\~/$HOME}"
-    if [ -r "$filepath" ]; then
-      value="$(tr -d '\r\n' < "$filepath")"
-    else
+    # Verify readable at hook time, but never embed the secret content in the
+    # rewritten command. Embed `$(cat <path>)` instead so the actual secret is
+    # only materialised inside the bash subshell at exec time — it never lands
+    # in the hook output, transcripts, or PreToolUse logs.
+    if [ ! -r "$filepath" ]; then
       continue
     fi
-  else
-    # Expand leading ~ for path-style values (PEM keys, kubeconfig, etc.).
-    case "$value" in
-      "~/"*) value="${HOME}${value#\~}" ;;
-      "~")   value="$HOME" ;;
-    esac
+    printf -v quoted_path "%q" "$filepath"
+    # tr strips any trailing CR/LF that the secret file might carry.
+    EXPORT_ARGS+=("${key}=\"\$(tr -d '\\r\\n' < ${quoted_path})\"")
+    APPLIED+=("$key")
+    continue
   fi
+  # Expand leading ~ for path-style values (PEM keys, kubeconfig, etc.).
+  case "$value" in
+    "~/"*) value="${HOME}${value#\~}" ;;
+    "~")   value="$HOME" ;;
+  esac
   [ -z "$value" ] && continue
   printf -v escaped "%q" "$value"
   EXPORT_ARGS+=("${key}=${escaped}")
