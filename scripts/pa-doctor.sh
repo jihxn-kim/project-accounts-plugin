@@ -52,6 +52,22 @@ expand_tilde() {
   esac
 }
 
+# Validate an ssh alias before passing it to `ssh -G`. Strict — disallows
+# spaces, =, *, ?, leading -, anything ssh might interpret as a flag or
+# pattern. We also use `--` as a defensive separator at the call site.
+valid_ssh_alias() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Pull a single key's value from `ssh -G` output. ssh -G emits lowercased
+# keys, one per line, space-separated. First match wins.
+ssh_g_value() {
+  awk -v k="$1" '$1 == k { $1=""; sub(/^ /, ""); print; exit }'
+}
+
 stat_perms() {
   stat -f '%Sp' "$1" 2>/dev/null || stat -c '%A' "$1" 2>/dev/null
 }
@@ -274,25 +290,91 @@ else
         fi
       done <<<"$CREDS"
 
-      # services — ssh reachability
+      # services — ssh reachability. Two registration shapes:
+      #   1. explicit:  { platform:"ssh", host, user, key, port? }
+      #   2. ssh_alias: { platform:"ssh", ssh_alias }  // resolves via ~/.ssh/config
+      #
+      # ssh_alias gets resolved through `ssh -G`, then probed exactly the same
+      # way as explicit form. The alias is validated against a strict charset
+      # before reaching ssh; we also pass it after `--` as belt-and-suspenders.
       if [ "$SKIP_NETWORK" != "1" ]; then
+        # Use US (\x1f, "Unit Separator") as the field separator instead of
+        # tab. With IFS=$'\t', bash treats tab as whitespace and collapses
+        # consecutive empty fields, so an empty ssh_alias would shift host into
+        # the alias slot. US is non-whitespace, never appears in mapping
+        # values, and bash 3.2's `read` splits on it cleanly. (SOH \x01 looks
+        # like a more natural choice but bash 3.2 swallows it during word
+        # splitting — confirmed on macOS /bin/bash 3.2.57.)
         SVCS="$(jq -r --arg p "$project" --arg e "$env" '
           (.projects[$p].envs[$e].services // {}) | to_entries[]
           | select(.value.platform == "ssh")
-          | [.key, .value.host // "", .value.user // "", (.value.port // 22 | tostring)]
-          | @tsv
+          | [
+              .key,
+              .value.ssh_alias // "",
+              .value.host      // "",
+              .value.user      // "",
+              (.value.port     // 22 | tostring)
+            ]
+          | join("\u001f")
         ' "$MAPPING")"
-        while IFS=$'\t' read -r svc host user port; do
+        while IFS=$'\037' read -r svc alias host user port; do
           [ -z "$svc" ] && continue
-          [ -z "$host" ] && { warn "    service.$svc — no host configured"; continue; }
+          if [ -n "$alias" ]; then
+            if ! valid_ssh_alias "$alias"; then
+              fail "    service.$svc ssh_alias=\"$alias\" — invalid (allowed: A-Z a-z 0-9 . _ -, no leading -)"
+              continue
+            fi
+            cfg="$(ssh -G -- "$alias" 2>/dev/null || true)"
+            if [ -z "$cfg" ]; then
+              fail "    service.$svc ssh_alias=\"$alias\" — ssh -G returned no output"
+              continue
+            fi
+            r_host="$(printf '%s\n' "$cfg" | ssh_g_value hostname)"
+            r_user="$(printf '%s\n' "$cfg" | ssh_g_value user)"
+            r_id="$(printf '%s\n' "$cfg" | ssh_g_value identityfile)"
+            r_port="$(printf '%s\n' "$cfg" | ssh_g_value port)"
+            # If ssh -G echoed the alias back as the hostname, this could be
+            # either:
+            #   (a) the alias has no matching Host block — ssh config falls
+            #       through to the global default and uses the alias literal
+            #       as the hostname; or
+            #   (b) there IS a Host block but its HostName equals the alias
+            #       (e.g. `Host db / HostName db`).
+            # We can't reliably distinguish without parsing ssh config or
+            # diffing `ssh -vG` debug output. Warn the user about the ambiguity
+            # but still probe — the TCP result will reveal whether the target
+            # is real.
+            if [ "$r_host" = "$alias" ]; then
+              warn "    service.$svc ssh_alias=\"$alias\" — hostname resolves to alias literal (no Host block matched, or Host block has HostName=$alias)"
+            fi
+            host="$r_host"
+            user="$r_user"
+            port="$r_port"
+            # Identity file from ssh config: warn (not fail) on permissions if
+            # the path resolves and is a regular file. Default keys (~/.ssh/id_*)
+            # may or may not exist — that's the user's choice, not our concern.
+            if [ -n "$r_id" ]; then
+              id_expanded="$(expand_tilde "$r_id")"
+              if [ -f "$id_expanded" ]; then
+                idperms=$(stat_perms "$id_expanded")
+                if [ "$idperms" != "-rw-------" ] && [ "$idperms" != "-r--------" ]; then
+                  warn "    service.$svc identity $id_expanded  [$idperms] — recommend chmod 600"
+                fi
+              fi
+            fi
+            label="service.$svc ssh $alias → $user@$host:$port"
+          else
+            [ -z "$host" ] && { warn "    service.$svc — no host or ssh_alias configured"; continue; }
+            label="service.$svc ssh $user@$host:$port"
+          fi
           if ! valid_port "$port"; then
-            warn "    service.$svc — invalid port: $port (must be integer 1-65535)"
+            warn "    $label — invalid port: $port (must be integer 1-65535)"
             continue
           fi
           if tcp_probe "$host" "$port" "$SSH_TIMEOUT"; then
-            ok "    service.$svc ssh $user@$host:$port — reachable"
+            ok "    $label — reachable"
           else
-            warn "    service.$svc ssh $user@$host:$port — port closed or unreachable (timeout ${SSH_TIMEOUT}s)"
+            warn "    $label — port closed or unreachable (timeout ${SSH_TIMEOUT}s)"
           fi
         done <<<"$SVCS"
       fi

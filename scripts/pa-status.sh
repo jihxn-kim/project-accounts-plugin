@@ -36,6 +36,24 @@ expand_tilde() {
   esac
 }
 
+# Validate an ssh alias name. Strict — disallows spaces, =, *, ?, leading -,
+# anything that ssh might interpret as a flag or pattern. The alias is passed
+# to `ssh -G`; rejecting metacharacters here keeps that call's surface small
+# even though we also use `--` as a defensive separator.
+valid_ssh_alias() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Extract a single key's value from `ssh -G` output. ssh -G emits lowercased
+# keys, one per line, space-separated. First match wins — same as ssh's own
+# first-match rule for Host blocks.
+ssh_g_value() {
+  awk -v k="$1" '$1 == k { $1=""; sub(/^ /, ""); print; exit }'
+}
+
 # --- resolve current project ----------------------------------------------
 
 MATCH_JSON="$(jq -r --arg cwd "$CWD" '
@@ -135,14 +153,47 @@ else
   printf 'Services in dev:\n'
   while IFS= read -r svc; do
     [ -z "$svc" ] && continue
-    line="$(jq -r --arg p "$PROJECT" --arg s "$svc" '
-      .projects[$p].envs.dev.services[$s]
-      | "  \($s) [\(.platform // "?")] " +
-        (if .platform == "ssh"
-         then "\(.user // "?")@\(.host // "?")  (key=\(.key // "?"))"
-         else (.service // .instance // "—") end)
-    ' "$MAPPING")"
-    printf '%s\n' "$line"
+    spec="$(jq -c --arg p "$PROJECT" --arg s "$svc" \
+      '.projects[$p].envs.dev.services[$s]' "$MAPPING")"
+    platform="$(jq -r '.platform // "?"' <<<"$spec")"
+    if [ "$platform" = "ssh" ]; then
+      alias_name="$(jq -r '.ssh_alias // ""' <<<"$spec")"
+      if [ -n "$alias_name" ]; then
+        if ! valid_ssh_alias "$alias_name"; then
+          printf '  %s [ssh] %s (alias) — invalid alias name (allowed: A-Z a-z 0-9 . _ -, no leading -)\n' \
+            "$svc" "$alias_name"
+          continue
+        fi
+        cfg="$(ssh -G -- "$alias_name" 2>/dev/null || true)"
+        if [ -z "$cfg" ]; then
+          printf '  %s [ssh] %s (alias) — could not resolve via ssh -G\n' "$svc" "$alias_name"
+          continue
+        fi
+        rhost="$(printf '%s\n' "$cfg" | ssh_g_value hostname)"
+        ruser="$(printf '%s\n' "$cfg" | ssh_g_value user)"
+        rid="$(printf '%s\n' "$cfg" | ssh_g_value identityfile)"
+        rport="$(printf '%s\n' "$cfg" | ssh_g_value port)"
+        # If hostname == alias literal, the alias may either be unconfigured
+        # (no Host block matched) or intentionally set with HostName == alias
+        # (e.g. `Host db / HostName db`). Show the resolved values either way
+        # — pa-doctor handles reachability, status is just an inspection tool.
+        if [ "$rhost" = "$alias_name" ]; then
+          printf '  %s [ssh] %s (alias, hostname=alias literal — verify ~/.ssh/config) → %s@%s:%s  (identity=%s)\n' \
+            "$svc" "$alias_name" "$ruser" "$rhost" "$rport" "${rid:-—}"
+        else
+          printf '  %s [ssh] %s → %s@%s:%s  (identity=%s)\n' \
+            "$svc" "$alias_name" "$ruser" "$rhost" "$rport" "${rid:-—}"
+        fi
+      else
+        user="$(jq -r '.user // "?"' <<<"$spec")"
+        host="$(jq -r '.host // "?"' <<<"$spec")"
+        key="$(jq -r '.key // "?"' <<<"$spec")"
+        printf '  %s [ssh] %s@%s  (key=%s)\n' "$svc" "$user" "$host" "$key"
+      fi
+    else
+      target="$(jq -r '.service // .instance // "—"' <<<"$spec")"
+      printf '  %s [%s] %s\n' "$svc" "$platform" "$target"
+    fi
   done <<<"$SVC_KEYS"
 fi
 
